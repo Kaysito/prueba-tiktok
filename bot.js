@@ -12,25 +12,27 @@ const pusher = new Pusher({
 const tiktokUsername = process.env.TIKTOK_USERNAME || "lindaaani";
 let tiktokConnection = new WebcastPushConnection(tiktokUsername);
 
+// Bandera para evitar múltiples intentos de conexión al mismo tiempo
+let isConnecting = false;
+
 function connectToTikTok() {
-    // Solo intentamos conectar si no estamos ya en proceso o conectados
-    if (tiktokConnection.getState().isConnected) return;
+    if (isConnecting) return;
+    
+    isConnecting = true;
 
     tiktokConnection.connect().then(state => {
+        isConnecting = false;
         console.log(`🟢 MOTOR ONLINE: @${state.roomInfo.owner.display_id}`);
     }).catch(err => {
-        // Silenciamos el error si ya estamos conectados
-        if (!err.message.includes('Already connected')) {
-            // console.error('🟡 Reconexión silenciosa...'); 
-        }
+        isConnecting = false;
+        // No imprimimos nada para mantener la consola limpia
         setTimeout(connectToTikTok, 15000); 
     });
 }
 
-// ─── MANEJO DE MENSAJES (MÁXIMA VELOCIDAD) ───────────────────────────
+// ─── MANEJO DE MENSAJES (FLUIDO) ───────────────────────────
 
 tiktokConnection.on('chat', data => {
-    // process.nextTick hace que Pusher envíe el mensaje de inmediato
     process.nextTick(() => {
         const payloadChat = {
             id: Date.now() + Math.random(),
@@ -42,8 +44,7 @@ tiktokConnection.on('chat', data => {
             isSystem: false
         };
 
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat)
-              .catch(e => {}); // Ignorar errores de Pusher para no trabar el bot
+        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat).catch(() => {});
     });
 });
 
@@ -60,25 +61,27 @@ tiktokConnection.on('gift', data => {
             isTikTok: true,
             isSystem: true 
         };
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo).catch(e => {});
+        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo).catch(() => {});
         console.log(`🎁 [REGALO] ${payloadRegalo.author} -> ${data.giftName}`);
     });
 });
 
-// ─── GESTIÓN DE CONEXIÓN (ANTI-LOGS MOLESTOS) ─────────────────────────
+// ─── GESTIÓN DE CONEXIÓN ─────────────────────────
 
 tiktokConnection.on('disconnected', () => {
+    isConnecting = false;
     setTimeout(connectToTikTok, 5000);
 });
 
-tiktokConnection.on('error', err => {
-    // Si el error es de "Ya conectado", no hacemos nada.
-    if (err && err.includes && err.includes('Already connected')) return;
-});
-
 tiktokConnection.on('streamEnd', () => {
+    isConnecting = false;
     setTimeout(connectToTikTok, 30000);
 });
 
-// Arrancar
+// Capturar errores para que no crasheen el proceso
+tiktokConnection.on('error', () => {
+    isConnecting = false;
+});
+
+// Iniciar
 connectToTikTok();
