@@ -12,76 +12,62 @@ const pusher = new Pusher({
 const tiktokUsername = process.env.TIKTOK_USERNAME || "lindaaani";
 let tiktokConnection = new WebcastPushConnection(tiktokUsername);
 
-// Bandera para evitar múltiples intentos de conexión al mismo tiempo
-let isConnecting = false;
+console.log(`🔎 Intentando conectar a TikTok: @${tiktokUsername}...`);
 
 function connectToTikTok() {
-    if (isConnecting) return;
-    
-    isConnecting = true;
-
     tiktokConnection.connect().then(state => {
-        isConnecting = false;
-        console.log(`🟢 MOTOR ONLINE: @${state.roomInfo.owner.display_id}`);
+        console.log(`🟢 MOTOR ONLINE: Conectado al Live ID ${state.roomId}`);
     }).catch(err => {
-        isConnecting = false;
-        // No imprimimos nada para mantener la consola limpia
+        console.error(`🔴 Error de conexión: ${err.message}`);
+        // Si el usuario no está en vivo, esto fallará. 
         setTimeout(connectToTikTok, 15000); 
     });
 }
 
-// ─── MANEJO DE MENSAJES (FLUIDO) ───────────────────────────
+// ─── EVENTOS DE ESCUCHA ───
 
 tiktokConnection.on('chat', data => {
-    process.nextTick(() => {
-        const payloadChat = {
-            id: Date.now() + Math.random(),
-            author: data.nickname || data.uniqueId, 
-            text: data.comment,
-            foto: data.profilePictureUrl,
-            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
-            isTikTok: true,
-            isSystem: false
-        };
+    console.log(`💬 Mensaje de ${data.nickname}: ${data.comment}`); // Log para ver en Railway
+    
+    const payloadChat = {
+        id: Date.now() + Math.random(),
+        author: data.nickname || data.uniqueId, 
+        text: data.comment,
+        foto: data.profilePictureUrl,
+        time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
+        isTikTok: true,
+        isSystem: false
+    };
 
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat).catch(() => {});
-    });
+    pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat).catch(e => console.error("Pusher Error:", e));
 });
 
 tiktokConnection.on('gift', data => {
     if (data.giftType === 1 && !data.repeatEnd) return; 
 
-    process.nextTick(() => {
-        const payloadRegalo = {
-            id: Date.now() + Math.random(),
-            author: data.nickname || data.uniqueId,
-            text: `🎁 ¡Envió ${data.repeatCount}x ${data.giftName}!`,
-            foto: data.profilePictureUrl,
-            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
-            isTikTok: true,
-            isSystem: true 
-        };
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo).catch(() => {});
-        console.log(`🎁 [REGALO] ${payloadRegalo.author} -> ${data.giftName}`);
-    });
+    const payloadRegalo = {
+        id: Date.now() + Math.random(),
+        author: data.nickname || data.uniqueId,
+        text: `🎁 ¡Envió ${data.repeatCount}x ${data.giftName}!`,
+        foto: data.profilePictureUrl,
+        time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
+        isTikTok: true,
+        isSystem: true 
+    };
+    
+    console.log(`🎁 REGALO: ${payloadRegalo.author} mandó ${data.giftName}`);
+    pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo).catch(e => console.error("Pusher Error:", e));
 });
 
-// ─── GESTIÓN DE CONEXIÓN ─────────────────────────
-
+// Detectar si TikTok nos saca
 tiktokConnection.on('disconnected', () => {
-    isConnecting = false;
+    console.log('⚠️ Desconectado de TikTok. Reintentando...');
     setTimeout(connectToTikTok, 5000);
 });
 
-tiktokConnection.on('streamEnd', () => {
-    isConnecting = false;
-    setTimeout(connectToTikTok, 30000);
+tiktokConnection.on('error', err => {
+    console.error('❌ TikTok Connection Error:', err);
 });
 
-// Capturar errores para que no crasheen el proceso
-tiktokConnection.on('error', () => {
-    isConnecting = false;
-});
-
-// Iniciar
+// Arrancar
 connectToTikTok();
