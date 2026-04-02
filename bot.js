@@ -12,20 +12,26 @@ const pusher = new Pusher({
 const tiktokUsername = process.env.TIKTOK_USERNAME || "lindaaani";
 let tiktokConnection = new WebcastPushConnection(tiktokUsername);
 
-// Función para conectar con manejo de errores
 function connectToTikTok() {
+    // Solo intentamos conectar si no estamos ya en proceso o conectados
+    if (tiktokConnection.getState().isConnected) return;
+
     tiktokConnection.connect().then(state => {
-        console.log(`🟢 CONECTADO AL LIVE: ${state.roomInfo.owner.display_id}`);
+        console.log(`🟢 MOTOR ONLINE: @${state.roomInfo.owner.display_id}`);
     }).catch(err => {
-        console.error('🔴 Error al conectar. Reintentando en 10s...', err.message);
-        setTimeout(connectToTikTok, 10000); // Reintenta en 10 segundos
+        // Silenciamos el error si ya estamos conectados
+        if (!err.message.includes('Already connected')) {
+            // console.error('🟡 Reconexión silenciosa...'); 
+        }
+        setTimeout(connectToTikTok, 15000); 
     });
 }
 
-// ─── EVENTOS ───────────────────────────────────────────────────────────
+// ─── MANEJO DE MENSAJES (MÁXIMA VELOCIDAD) ───────────────────────────
 
 tiktokConnection.on('chat', data => {
-    try {
+    // process.nextTick hace que Pusher envíe el mensaje de inmediato
+    process.nextTick(() => {
         const payloadChat = {
             id: Date.now() + Math.random(),
             author: data.nickname || data.uniqueId, 
@@ -35,17 +41,16 @@ tiktokConnection.on('chat', data => {
             isTikTok: true,
             isSystem: false
         };
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat);
-        console.log(`💬 [CHAT] ${payloadChat.author}: ${payloadChat.text}`);
-    } catch (e) {
-        console.error("❌ Error procesando chat:", e);
-    }
+
+        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadChat)
+              .catch(e => {}); // Ignorar errores de Pusher para no trabar el bot
+    });
 });
 
 tiktokConnection.on('gift', data => {
-    try {
-        if (data.giftType === 1 && !data.repeatEnd) return; 
+    if (data.giftType === 1 && !data.repeatEnd) return; 
 
+    process.nextTick(() => {
         const payloadRegalo = {
             id: Date.now() + Math.random(),
             author: data.nickname || data.uniqueId,
@@ -55,23 +60,25 @@ tiktokConnection.on('gift', data => {
             isTikTok: true,
             isSystem: true 
         };
-        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo);
-        console.log(`🎁 [REGALO] ${payloadRegalo.author} mandó ${data.repeatCount} ${data.giftName}`);
-    } catch (e) {
-        console.error("❌ Error procesando regalo:", e);
-    }
+        pusher.trigger('interactivos', 'nuevo-mensaje-tiktok', payloadRegalo).catch(e => {});
+        console.log(`🎁 [REGALO] ${payloadRegalo.author} -> ${data.giftName}`);
+    });
 });
 
-// Manejo de desconexiones inesperadas
+// ─── GESTIÓN DE CONEXIÓN (ANTI-LOGS MOLESTOS) ─────────────────────────
+
 tiktokConnection.on('disconnected', () => {
-    console.log('🔴 Conexión perdida. Reintentando...');
     setTimeout(connectToTikTok, 5000);
 });
 
-tiktokConnection.on('streamEnd', () => {
-    console.log('🚫 El Live terminó. Esperando 1 minuto para checar si vuelve...');
-    setTimeout(connectToTikTok, 60000);
+tiktokConnection.on('error', err => {
+    // Si el error es de "Ya conectado", no hacemos nada.
+    if (err && err.includes && err.includes('Already connected')) return;
 });
 
-// Iniciar primera conexión
+tiktokConnection.on('streamEnd', () => {
+    setTimeout(connectToTikTok, 30000);
+});
+
+// Arrancar
 connectToTikTok();
