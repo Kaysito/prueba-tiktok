@@ -1,0 +1,22 @@
+{
+  "name": "prueba-tiktok",
+  "version": "1.0.0",
+  "description": "Bot de interactivos TikTok para el Centro de Juegos",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "tiktok",
+    "pusher",
+    "bot"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "dependencies": {
+    "pusher": "^5.3.3",
+    "tiktok-live-connector": "^2.1.1-beta1"
+  }
+}
