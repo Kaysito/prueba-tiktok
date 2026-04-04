@@ -1,4 +1,4 @@
-require('dotenv').config(); // Por si corres local, pero Railway lo ignora y usa su env
+
 const express = require('express');
 const cors = require('cors');
 const { WebcastPushConnection } = require('tiktok-live-connector');
