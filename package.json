@@ -16,6 +16,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
     "pusher": "^5.3.3",
     "tiktok-live-connector": "^2.1.1-beta1"
   }
