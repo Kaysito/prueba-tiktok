@@ -9,46 +9,46 @@ app.use(express.json());
 
 // Verifica si las variables de entorno se están cargando
 console.log("Pusher Config Check:", {
-  appId: process.env.PUSHER_APP_ID ? "OK" : "FALTA",
-  key: process.env.PUSHER_KEY ? "OK" : "FALTA",
-  cluster: process.env.PUSHER_CLUSTER ? "OK" : "FALTA"
+    appId: process.env.PUSHER_APP_ID ? "OK" : "FALTA",
+    key: process.env.PUSHER_KEY ? "OK" : "FALTA",
+    cluster: process.env.PUSHER_CLUSTER ? "OK" : "FALTA"
 });
 
 const pusher = new Pusher({
-  appId: process.env.PUSHER_APP_ID,
-  key: process.env.PUSHER_KEY,
-  secret: process.env.PUSHER_SECRET,
-  cluster: process.env.PUSHER_CLUSTER,
-  useTLS: true
+    appId: process.env.PUSHER_APP_ID,
+    key: process.env.PUSHER_KEY,
+    secret: process.env.PUSHER_SECRET,
+    cluster: process.env.PUSHER_CLUSTER,
+    useTLS: true
 });
 
 // ─── CACHE GLOBAL ───
 const activeStreams = new Map();
 
-const timeFormatter = new Intl.DateTimeFormat("es", {
-  hour: "2-digit",
-  minute: "2-digit"
-});
+// Helper para extraer la URL de la foto (TikTok envía un objeto complejo)
+const getFotoUrl = (data) => {
+    if (data.profilePictureUrl) {
+        return typeof data.profilePictureUrl === 'string' 
+          ? data.profilePictureUrl 
+          : (data.profilePictureUrl.urls && data.profilePictureUrl.urls[0]) || '';
+    }
+    return '';
+};
 
-function getTime() {
-  return timeFormatter.format(Date.now());
-}
-
-let idCounter = 0;
+// Generador de ID más robusto
+let idCounter = Date.now();
 function generateId() {
-  return ++idCounter;
+    return `${idCounter++}`;
 }
 
 // ─── Envío de Pusher con Error Visible ───
 function sendToPusher(channel, event, payload) {
-  setImmediate(() => {
     pusher.trigger(channel, event, payload).catch((err) => {
-      console.error(`🔴 ERROR PUSHER en canal ${channel}:`, err.message);
+        console.error(`🔴 ERROR PUSHER en canal ${channel}:`, err.message);
     });
-  });
 }
 
-// ─── ENDPOINT: CONECTAR ───
+// ─── ENDPOINT: CONECTAR (OPTIMIZADO) ───
 app.post('/api/conectar', async (req, res) => {
     const { username } = req.body;
 
@@ -56,135 +56,99 @@ app.post('/api/conectar', async (req, res) => {
         return res.status(400).json({ error: "Falta el username de TikTok." });
     }
 
-    if (activeStreams.has(username)) {
-        return res.json({ message: "El bot ya está escuchando a este usuario.", username });
+    // 🔥 Limpieza de nombre (quitar @ y pasar a minúsculas)
+    const cleanName = username.toLowerCase().replace('@', '');
+    const userChannel = `interactivos-${cleanName}`;
+
+    if (activeStreams.has(cleanName)) {
+        console.log(`♻️ Reusando conexión activa para @${cleanName}`);
+        return res.json({ message: "Ya conectado", username: cleanName, channel: userChannel });
     }
 
-    console.log(`🔎 Iniciando conexión para @${username}...`);
+    console.log(`🔎 Iniciando conexión para @${cleanName}...`);
 
-    let tiktokConnection = new WebcastPushConnection(username);
-    let reconnectDelay = 5000;
-    let isIntentionallyDisconnected = false; 
+    let tiktokConnection = new WebcastPushConnection(cleanName, {
+        enableExtendedGiftInfo: true,
+        requestPollingIntervalMs: 1000 // Acelera la detección de eventos
+    });
 
-    const userChannel = `interactivos-${username.toLowerCase()}`;
-
-    // 🔥 1. DECLARAMOS LOS EVENTOS ANTES DE CONECTAR 🔥
-
-    // ─── CHAT ───
+    // ─── EVENTO CHAT ───
     tiktokConnection.on('chat', data => {
-        console.log(`💬 Chat recibido de @${data.uniqueId}: ${data.comment}`); // Chismoso 1
         const payload = {
             id: generateId(),
             author: data.nickname || data.uniqueId,
             text: data.comment,
-            foto: data.profilePictureUrl,
-            time: getTime(),
+            foto: getFotoUrl(data),
+            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
             isTikTok: true,
             isSystem: false
         };
         sendToPusher(userChannel, 'nuevo-mensaje-tiktok', payload);
     });
 
-    // ─── REGALOS ───
+    // ─── EVENTO REGALOS ───
     tiktokConnection.on('gift', data => {
         if (data.giftType === 1 && !data.repeatEnd) return;
-        console.log(`🎁 Regalo recibido de @${data.uniqueId}: ${data.giftName}`); // Chismoso 2
         
         const payload = {
             id: generateId(),
             author: data.nickname || data.uniqueId,
             text: `🎁 ¡Envió ${data.repeatCount}x ${data.giftName}!`,
-            foto: data.profilePictureUrl,
-            time: getTime(),
+            foto: getFotoUrl(data),
+            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
             isTikTok: true,
             isSystem: true
         };
         sendToPusher(userChannel, 'nuevo-mensaje-tiktok', payload);
     });
 
-    // ─── ERRORES DE TIKTOK ───
     tiktokConnection.on('error', err => {
-        console.error(`❌ Error en el stream de @${username}:`, err.message);
+        console.error(`❌ Error en @${cleanName}:`, err.message);
     });
 
     tiktokConnection.on('disconnected', () => {
-        console.log(`⚠️ @${username} desconectado de TikTok`);
-        reconnect();
+        console.log(`⚠️ @${cleanName} desconectado`);
+        activeStreams.delete(cleanName);
     });
 
     tiktokConnection.on('streamEnd', () => {
-         console.log(`🛑 El live de @${username} ha terminado.`);
-         if(activeStreams.has(username)){
-             activeStreams.get(username).isIntentionallyDisconnected = true;
-             activeStreams.delete(username);
-         }
+        console.log(`🛑 Live terminado para @${cleanName}`);
+        activeStreams.delete(cleanName);
     });
 
-    // ─── RECONEXIÓN ───
-    function reconnect() {
-        const streamData = activeStreams.get(username);
-        if (!streamData || streamData.isIntentionallyDisconnected) {
-            console.log(`🛑 Bucle de reconexión abortado para @${username}`);
-            return;
-        }
-
-        reconnectDelay = Math.min(reconnectDelay * 2, 60000);
-        console.log(`🔁 Reintentando @${username} en ${reconnectDelay / 1000}s`);
-
-        setTimeout(async () => {
-            try {
-                const checkData = activeStreams.get(username);
-                if (!checkData || checkData.isIntentionallyDisconnected) return;
-
-                await tiktokConnection.connect();
-                reconnectDelay = 5000;
-                console.log(`🟢 Reconectado @${username}`);
-            } catch {
-                reconnect(); 
-            }
-        }, reconnectDelay);
-    }
-
-    // 🔥 2. AHORA SÍ CONECTAMOS 🔥
     try {
-        const state = await tiktokConnection.connect();
-        activeStreams.set(username, { connection: tiktokConnection, isIntentionallyDisconnected });
-        console.log(`🟢 CONECTADO: @${state.roomInfo.owner.display_id}`);
+        await tiktokConnection.connect();
+        activeStreams.set(cleanName, tiktokConnection);
+        console.log(`🟢 CONECTADO OK: @${cleanName}`);
 
         res.json({
+            success: true,
             message: "Conexión exitosa",
-            username,
+            username: cleanName,
             channel: userChannel
         });
 
     } catch (err) {
-        console.error(`🔴 Error conectando a @${username}:`, err.message);
-        res.status(500).json({
-            error: "No se pudo conectar. ¿El live está activo?",
-            details: err.message
-        });
+        console.error(`🔴 Fallo al conectar @${cleanName}:`, err.message);
+        res.status(500).json({ error: "No se pudo conectar. ¿El live está activo?" });
     }
 });
 
-// ─── ENDPOINT: DESCONECTAR MANUALLY ───
+// ─── ENDPOINT: DESCONECTAR ───
 app.post('/api/desconectar', (req, res) => {
-    const { username } = req.body;
-    if (!username) return res.status(400).json({ error: "Falta el username." });
+    const name = req.body.username?.toLowerCase().replace('@', '');
+    if (!name) return res.status(400).json({ error: "Falta el username." });
 
-    const streamData = activeStreams.get(username);
-    if (streamData) {
-        streamData.isIntentionallyDisconnected = true;
-        streamData.connection.disconnect();
-        activeStreams.delete(username);
-        
-        console.log(`🔌 Desconectado manualmente: @${username}`);
-        return res.json({ success: true, message: `Bot desconectado de @${username}` });
-    } else {
-        return res.json({ message: "El bot no estaba conectado a ese usuario." });
+    if (activeStreams.has(name)) {
+        const conn = activeStreams.get(name);
+        conn.disconnect();
+        activeStreams.delete(name);
+        console.log(`🔌 Desconectado manualmente: @${name}`);
+        return res.json({ success: true, message: `Bot desconectado de @${name}` });
     }
+    res.json({ message: "No estaba conectado." });
 });
 
-// ─── ENDPOINT DE SALUD ───
 app.get('/api/status', (req, res) => {
     res.json({
         activeConnections: activeStreams.size,
@@ -192,7 +156,6 @@ app.get('/api/status', (req, res) => {
     });
 });
 
-// ─── SERVER ───
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
     console.log(`🚀 API Bot Multi-Streamer en puerto ${PORT}`);
