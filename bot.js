@@ -7,7 +7,6 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Verifica si las variables de entorno se están cargando
 console.log("Pusher Config Check:", {
     appId: process.env.PUSHER_APP_ID ? "OK" : "FALTA",
     key: process.env.PUSHER_KEY ? "OK" : "FALTA",
@@ -22,33 +21,28 @@ const pusher = new Pusher({
     useTLS: true
 });
 
-// ─── CACHE GLOBAL ───
 const activeStreams = new Map();
 
-// Helper para extraer la URL de la foto (TikTok envía un objeto complejo)
+// ─── HELPERS ───
 const getFotoUrl = (data) => {
     if (data.profilePictureUrl) {
-        return typeof data.profilePictureUrl === 'string' 
-          ? data.profilePictureUrl 
-          : (data.profilePictureUrl.urls && data.profilePictureUrl.urls[0]) || '';
+        return typeof data.profilePictureUrl === 'string'
+            ? data.profilePictureUrl
+            : (data.profilePictureUrl.urls && data.profilePictureUrl.urls[0]) || '';
     }
     return '';
 };
 
-// Generador de ID más robusto
 let idCounter = Date.now();
-function generateId() {
-    return `${idCounter++}`;
-}
+const generateId = () => `${idCounter++}`;
 
-// ─── Envío de Pusher con Error Visible ───
 function sendToPusher(channel, event, payload) {
     pusher.trigger(channel, event, payload).catch((err) => {
-        console.error(`🔴 ERROR PUSHER en canal ${channel}:`, err.message);
+        console.error(`🔴 ERROR PUSHER (${channel}):`, err.message);
     });
 }
 
-// ─── ENDPOINT: CONECTAR (OPTIMIZADO) ───
+// ─── CONECTAR ───
 app.post('/api/conectar', async (req, res) => {
     const { username } = req.body;
 
@@ -56,107 +50,151 @@ app.post('/api/conectar', async (req, res) => {
         return res.status(400).json({ error: "Falta el username de TikTok." });
     }
 
-    // 🔥 Limpieza de nombre (quitar @ y pasar a minúsculas)
     const cleanName = username.toLowerCase().replace('@', '');
     const userChannel = `interactivos-${cleanName}`;
 
     if (activeStreams.has(cleanName)) {
-        console.log(`♻️ Reusando conexión activa para @${cleanName}`);
-        return res.json({ message: "Ya conectado", username: cleanName, channel: userChannel });
+        console.log(`♻️ Reusando conexión @${cleanName}`);
+        return res.json({ success: true, username: cleanName, channel: userChannel });
     }
 
-    console.log(`🔎 Iniciando conexión para @${cleanName}...`);
+    console.log(`🔎 Conectando a @${cleanName}...`);
 
-    let tiktokConnection = new WebcastPushConnection(cleanName, {
-        enableExtendedGiftInfo: true,
-        requestPollingIntervalMs: 1000 // Acelera la detección de eventos
+    const connection = new WebcastPushConnection(cleanName, {
+        enableExtendedGiftInfo: true
+        // ❌ quitamos requestPollingIntervalMs (rompe eventos)
     });
 
-    // ─── EVENTO CHAT ───
-    tiktokConnection.on('chat', data => {
+    // ─── DEBUG CLAVE ───
+    connection.on('connected', state => {
+        console.log(`🟢 CONECTADO A ROOM: ${state.roomId}`);
+    });
+
+    // ─── CHAT ───
+    connection.on('chat', data => {
+        console.log("💬 CHAT:", data.uniqueId, data.comment); // 🔥 DEBUG
+
         const payload = {
             id: generateId(),
             author: data.nickname || data.uniqueId,
             text: data.comment,
             foto: getFotoUrl(data),
-            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
+            time: new Date().toLocaleTimeString("es", {
+                hour: "2-digit",
+                minute: "2-digit"
+            }),
             isTikTok: true,
             isSystem: false
         };
+
         sendToPusher(userChannel, 'nuevo-mensaje-tiktok', payload);
     });
 
-    // ─── EVENTO REGALOS ───
-    tiktokConnection.on('gift', data => {
+    // ─── REGALOS ───
+    connection.on('gift', data => {
+        console.log("🎁 GIFT:", data.uniqueId, data.giftName);
+
         if (data.giftType === 1 && !data.repeatEnd) return;
-        
+
         const payload = {
             id: generateId(),
             author: data.nickname || data.uniqueId,
-            text: `🎁 ¡Envió ${data.repeatCount}x ${data.giftName}!`,
+            text: `🎁 ${data.repeatCount}x ${data.giftName}`,
             foto: getFotoUrl(data),
-            time: new Date().toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" }),
+            time: new Date().toLocaleTimeString("es", {
+                hour: "2-digit",
+                minute: "2-digit"
+            }),
             isTikTok: true,
             isSystem: true
         };
+
         sendToPusher(userChannel, 'nuevo-mensaje-tiktok', payload);
     });
 
-    tiktokConnection.on('error', err => {
-        console.error(`❌ Error en @${cleanName}:`, err.message);
+    // ─── ERRORES ───
+    connection.on('error', err => {
+        console.error(`❌ ERROR @${cleanName}:`, err);
     });
 
-    tiktokConnection.on('disconnected', () => {
-        console.log(`⚠️ @${cleanName} desconectado`);
+    // ─── RECONEXIÓN AUTOMÁTICA ───
+    connection.on('disconnected', () => {
+        console.log(`⚠️ Desconectado @${cleanName}, reconectando...`);
+
+        activeStreams.delete(cleanName);
+
+        setTimeout(() => {
+            fetchReconnect(cleanName);
+        }, 3000);
+    });
+
+    connection.on('streamEnd', () => {
+        console.log(`🛑 Live terminado @${cleanName}`);
         activeStreams.delete(cleanName);
     });
 
-    tiktokConnection.on('streamEnd', () => {
-        console.log(`🛑 Live terminado para @${cleanName}`);
-        activeStreams.delete(cleanName);
-    });
+    async function fetchReconnect(name) {
+        try {
+            const newConn = new WebcastPushConnection(name);
+            await newConn.connect();
+            activeStreams.set(name, newConn);
+            console.log(`🔁 Reconectado @${name}`);
+        } catch (err) {
+            console.error(`❌ Error reconectando @${name}`);
+        }
+    }
 
     try {
-        await tiktokConnection.connect();
-        activeStreams.set(cleanName, tiktokConnection);
-        console.log(`🟢 CONECTADO OK: @${cleanName}`);
+        await connection.connect();
+
+        activeStreams.set(cleanName, connection);
+
+        console.log(`✅ BOT ACTIVO @${cleanName}`);
 
         res.json({
             success: true,
-            message: "Conexión exitosa",
             username: cleanName,
             channel: userChannel
         });
 
     } catch (err) {
-        console.error(`🔴 Fallo al conectar @${cleanName}:`, err.message);
-        res.status(500).json({ error: "No se pudo conectar. ¿El live está activo?" });
+        console.error(`🔴 ERROR CONEXIÓN @${cleanName}:`, err.message);
+
+        res.status(500).json({
+            error: "No se pudo conectar. El live debe estar activo."
+        });
     }
 });
 
-// ─── ENDPOINT: DESCONECTAR ───
+// ─── DESCONECTAR ───
 app.post('/api/desconectar', (req, res) => {
     const name = req.body.username?.toLowerCase().replace('@', '');
-    if (!name) return res.status(400).json({ error: "Falta el username." });
+
+    if (!name) {
+        return res.status(400).json({ error: "Falta username" });
+    }
 
     if (activeStreams.has(name)) {
-        const conn = activeStreams.get(name);
-        conn.disconnect();
+        activeStreams.get(name).disconnect();
         activeStreams.delete(name);
-        console.log(`🔌 Desconectado manualmente: @${name}`);
-        return res.json({ success: true, message: `Bot desconectado de @${name}` });
+
+        console.log(`🔌 Desconectado @${name}`);
+
+        return res.json({ success: true });
     }
-    res.json({ message: "No estaba conectado." });
+
+    res.json({ message: "No estaba conectado" });
 });
 
+// ─── STATUS ───
 app.get('/api/status', (req, res) => {
     res.json({
-        activeConnections: activeStreams.size,
-        users: Array.from(activeStreams.keys())
+        active: activeStreams.size,
+        users: [...activeStreams.keys()]
     });
 });
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`🚀 API Bot Multi-Streamer en puerto ${PORT}`);
+    console.log(`🚀 Bot corriendo en puerto ${PORT}`);
 });
